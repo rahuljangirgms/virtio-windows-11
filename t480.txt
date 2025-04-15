@@ -1,0 +1,232 @@
+Enhancing Performance and Virtualization on a ThinkPad T480 (Debian 12)
+System Configuration and Optimal Driver Setup
+Overview of Hardware: The Lenovo ThinkPad T480 (Intel Core i7-8650U, 16GB RAM, 512GB NVMe SSD) is well-supported on Linux. Debian 12’s kernel includes drivers for most devices out-of-the-box​
+wiki.archlinux.org
+, but some configuration ensures you’re using the optimal drivers for performance:
+CPU and Microcode: Install the intel-microcode package to apply the latest CPU firmware fixes, which can improve stability and performance. By default, modern Intel CPUs use the intel_pstate driver (instead of generic ACPI speed-stepping). This is preferred, as it’s designed for Intel chips and “knows what the CPU can do” better than the older ACPI driver​
+askubuntu.com
+. The intel_pstate driver is built-in and automatically enabled for 8th-gen Core processors​
+wiki.archlinux.org
+. It provides two pseudo-governors (powersave and performance) that both allow dynamic frequency scaling with Intel SpeedShift. You can use cpupower frequency-info to verify the active driver/governor. For maximum performance, you might set the governor to performance (or set intel_pstate to active mode) when running intensive tasks or VMs. On battery, however, the default powersave mode will conserve energy with minimal impact on responsiveness​
+wiki.archlinux.org
+.
+Storage (NVMe SSD): The NVMe driver is included in the kernel and should load automatically. To boost disk I/O performance, ensure the SSD is using NVMe (check lsblk -d -o name,rota,sched – it should show non-rotational). Use the noop or none I/O scheduler for NVMe (which has its own internal scheduler) to minimize overhead​
+docs.redhat.com
+. In Debian 12, the default for NVMe is usually none (multi-queue). You can also mount filesystems with noatime to reduce write overhead. If using EXT4 or Btrfs, enable TRIM (discard option or a periodic fstrim service) so the guest VMs and host can maintain SSD performance. The Intel SSD controller will already use PCIe 3.0 x4 speeds – just ensure no BIOS setting is limiting NVMe performance (the BIOS SATA mode should be AHCI, not RAID/RST, if that applies).
+Integrated Graphics: The T480’s Intel UHD Graphics 620 is handled by the i915 driver in the kernel. In a minimal DWM setup, this driver should load automatically and provide hardware acceleration for 2D/3D. Ensure the package firmware-misc-nonfree (which includes Intel GPU firmware) is installed for features like video decode acceleration. Debian defaults to the modesetting Xorg driver for Intel GPUs, which is fine for most uses. If you need finer control (e.g., to fix brightness keys or power management), you could install Intel’s optional driver (xserver-xorg-video-intel), but note it is deprecated upstream. The brightness control on T480 works via ACPI; if it doesn’t, a workaround is to use tools like acpilight instead of xbacklight​
+wiki.archlinux.org
+​
+wiki.archlinux.org
+. In general, no extra action is needed for GPU performance – the iGPU will automatically clock up with load.
+Touchpad and TrackPoint: ThinkPad input devices work out-of-the-box with Debian’s default libinput drivers​
+wiki.archlinux.org
+. To improve touchpad responsiveness, you can enable Synaptics InterTouch. Add a modprobe option for the psmouse driver: options psmouse synaptics_intertouch=1 in /etc/modprobe.d/psmouse.conf, then reboot. This enables a higher event reporting frequency on the T480’s touchpad​
+wiki.archlinux.org
+. In tests, two-finger scroll events jump from ~40Hz to ~135Hz, resulting in much smoother scrolling​
+wiki.archlinux.org
+. This tweak significantly boosts the desktop scrolling performance and touchpad fluidity​
+wiki.archlinux.org
+. (Note: If your T480 has the “glass” touchpad firmware, this specific tweak may not apply​
+wiki.archlinux.org
+, but most units benefit from it.) The TrackPoint requires no special config beyond libinput; adjust sensitivity via GUI tools or xinput if needed.
+Fingerprint Sensor: The T480’s Synaptics fingerprint reader (ID 06cb:009a) was initially unsupported in Linux, but support is now available. Recent versions of libfprint (with the "tod" driver) and fprintd can use this sensor​
+wiki.archlinux.org
+. Ensure you have the fprintd service installed and the synaptics WBD drivers (Debian 12 includes support via the libfprint-2-tod1 package). You may need to install the proprietary firmware blob for the sensor (handled by fwupd or fingerprint-enable scripts). Once set up, you can enroll fingerprints with fprintd-enroll. Keep in mind this doesn’t affect system performance, but it’s a hardware feature worth enabling for convenience. (If you prefer open-source only: note that the driver involves a binary firmware, but it’s the only solution for now​
+wiki.archlinux.org
+.)
+Other Devices: The Intel dual-band wireless (8086:24FD) and Bluetooth (8087:0A2B) are supported by the iwlwifi driver – just install Debian’s firmware-iwlwifi package to load the Wi-Fi firmware. The Gigabit Ethernet (Intel i219-LM) works with the e1000e driver (built-in). Audio (Intel HD Audio) works via ALSA/PulseAudio out-of-box. The T480’s webcam and SD card reader also use standard UVC and USB storage drivers. No special performance tweaks are needed for these, aside from keeping firmware updated. In general, update your BIOS/UEFI to the latest version (Debian’s fwupd can apply ThinkPad firmware updates​
+wiki.archlinux.org
+) to ensure all hardware runs optimally and to get fixes (e.g., for CPU turbo behavior or Thunderbolt issues).
+KVM/QEMU Virtualization Setup and Tuning
+With Intel VT-x and VT-d enabled in BIOS, the T480 can run Windows VMs efficiently using KVM (Kernel-based Virtual Machine). Below are recommendations for setting up KVM/QEMU on Debian 12 and tuning it for performance:
+Installation and Basic Setup: Install the packages for KVM and libvirt: sudo apt install qemu-kvm libvirt-clients libvirt-daemon-system virt-manager. This includes QEMU (the emulator), the KVM kernel module, and management tools. The KVM kernel modules (kvm and kvm_intel) should load automatically on boot if VT-x is enabled. Verify this with lsmod | grep kvm. Also add your user to the libvirt and kvm groups for permission to manage VMs. We’ll assume you’ll use virt-manager or virsh to create the Windows VM.
+Enable IOMMU (VT-d): Since your CPU and BIOS support VT-d (for device passthrough), consider enabling it via kernel parameter. Add intel_iommu=on (and optionally iommu=pt) to your GRUB command line to ensure the IOMMU is active. This allows you to pass hardware devices directly to VMs if needed and can improve overhead for virtual DMA operations. Even if you don’t passthrough devices, having VT-d on with iommu=pt (pass-through mode for unused devices) can marginally reduce overhead for host devices. Note: If you plan to use GPU passthrough, the T480 has only an Intel iGPU (no discrete GPU), and passing an iGPU is not generally practical. But you could passthrough other devices like a USB controller if desired. For standard Windows VM use, VT-d mainly helps if you use USB redirection or similar features.
+CPU Configuration – host passthrough and Pinning: By default, libvirt will expose a generic CPU model to the VM. For maximum performance, change the VM’s CPU setting to host-passthrough mode. This makes the guest see the full host CPU features (i7-8650U capabilities) without any emulation overhead. Using host-passthrough brings performance “as close to bare metal as can be” for CPU-bound workloads​
+leduccc.medium.com
+. In libvirt XML, this looks like: <cpu mode='host-passthrough' .../>. Additionally, vCPU pinning can improve consistency: you can pin the VM’s virtual CPUs to specific host CPU cores. Pinning vCPUs increases cache affinity and reduces context-switch overhead​
+docs.redhat.com
+. For example, if your i7-8650U has 4 cores + HyperThreading (8 threads), you might allocate 2 or 4 vCPUs to the Windows VM and pin them to distinct physical cores. Use virsh vcpupin or edit the XML <cputune><vcpupin vcpu='0' cpuset='3'/><vcpupin vcpu='1' cpuset='7'/></cputune> (where 3 and 7 are a hyperthread pair on core 3, for instance). This ensures the vCPUs run on the same core(s) each time, improving L1/L2 cache reuse​
+docs.redhat.com
+. For even tighter control, isolate those cores from the host scheduler (e.g., kernel isolcpus= or cset shield) so that only the VM uses them. Pin the QEMU I/O threads as well (using <emulatorpin> in XML) to a separate core if possible to avoid contention​
+docs.redhat.com
+. These steps are optional but can yield more stable high performance for the VM.
+Memory Optimization (HugePages): Consider using Huge Pages for the VM’s memory. By default, Linux uses 4KB memory pages; using 2MB or 1GB hugepages for guest RAM can significantly boost performance by reducing TLB misses​
+docs.redhat.com
+. You can enable Transparent Huge Pages (THP), which is on by default and lets the kernel use huge pages automatically when possible​
+docs.redhat.com
+​
+docs.redhat.com
+. For even more control, allocate static hugepages: e.g., reserve large pages by adding default_hugepagesz=2M hugepages=2048 (for 4GB) to your kernel parameters or via sysctl. Then in the VM XML, enable hugepages memory backing: <memoryBacking><hugepages/></memoryBacking>. This ensures the guest memory is backed by hugepages, improving throughput. Also lock the guest memory (<memoryBacking locked='true'/>) to prevent the host from swapping out VM RAM. Note that if you dedicate, say, 8GB to a Windows VM, you need to leave enough RAM for the host (16GB total might allow one 8GB VM comfortably without swap). Hugepages will also prevent that memory from being used by others, so plan accordingly. Finally, disable KSM (Kernel Same-Page Merging) on the host if it’s running – KSM saves memory by deduplicating RAM across VMs, but it incurs overhead and can reduce hugepage benefits​
+docs.redhat.com
+​
+docs.redhat.com
+. On a single-VM or low-memory system, KSM is usually off by default (it’s off in Debian unless manually enabled).
+VirtIO Drivers (Storage & Network): When creating the Windows VM, use virtio paravirtualized devices for disk and network to get near-native I/O speeds. Virtio bypasses emulation by providing a direct interface between the guest and host for these devices​
+pve.proxmox.com
+​
+pve.proxmox.com
+. For Windows guests, you'll need to install the Red Hat VirtIO drivers (available in the virtio-win ISO from Fedora/Proxmox). During Windows installation, load the VirtIO disk driver (so Windows can see the virtual disk). After install, also update the VM's network interface to virtio-net and install the VirtIO NIC driver in Windows. Using VirtIO can maximize performance compared to emulated IDE or SATA devices​
+pve.proxmox.com
+ – disk throughput and network bandwidth will be much higher and CPU usage lower. Additionally, install the QEMU Guest Agent and SPICE guest tools from the VirtIO ISO, as these will improve integration (allowing safe shutdowns, time sync, and enhanced display features in Spice). Tip: Use virtio-scsi for the disk if available (it allows advanced features and multiple disks on one controller), and enable writeback caching in the VM settings for a balance of safety and speed (or cache=none for raw performance with battery-backed write flush from host).
+Graphics: SPICE vs VNC: For interacting with the Windows VM’s desktop, SPICE is generally recommended over plain VNC. SPICE is a QEMU-integrated remote display protocol that offers superior speed and features​
+admin-magazine.com
+. With the QXL virtual GPU and SPICE drivers, you get faster graphics updates, cursor integration, clipboard sharing, and dynamic resolution. In fact, Spice is specifically designed for high-latency multimedia (it can handle video playback more smoothly than VNC)​
+serverfault.com
+. In practice, a properly configured SPICE session provides a much more responsive user experience than VNC​
+reddit.com
+. To use SPICE, configure the VM with a QXL or virtio-gpu video device and add a SPICE display. Install the Windows QXL driver (from the VirtIO ISO) if using QXL. Also run the Spice Guest Agent inside Windows (included in the guest tools installer) to enable clipboard and automatic resolution. You can connect using virt-viewer or remote-viewer which uses Spice. If you only need basic display and prefer simplicity, VNC will work (especially over network), but expect less responsiveness and features. For local use on your T480, SPICE is ideal for near-native feel​
+admin-magazine.com
+.
+Additional VM Performance Tips: Enable CPU Enlightenments for the Windows guest. KVM can expose Hyper-V paravirtualization interfaces to Windows, which tricks Windows into using optimizations as if it were on Hyper-V. This can improve things like timekeeping, interrupts, and CPU usage. In libvirt, set <hyperv> flags (e.g., <feature name='relaxed' state='on'/>, vapic, spinlocks, etc., and set vendor_id to something like KVMKVMKVM to avoid any old Hyper-V detection issues). Enabling these Hyper-V enlightenments is known to increase Windows VM responsiveness and save CPU​
+leduccc.medium.com
+​
+leduccc.medium.com
+. Also, ensure the VM uses the VirtIO-balloon driver for memory (so the guest can return unused memory to host if needed), but if you want fixed performance, you can choose to give the VM a fixed RAM and not rely on ballooning. For disk intensive VMs, use virtio-blk or virtio-scsi and consider the IO cache mode: cache=none (I/O bypasses host page cache) often yields the best performance for virtual disks​
+docs.redhat.com
+. This avoids double-caching and lets the guest OS manage caching. If using cache=none, make sure the storage is reliable (which an SSD is, plus Linux will ensure writes hit the disk). You could also try cache=writeback for a good balance on a UPS-backed system​
+docs.redhat.com
+. Finally, if your Windows VM is 8+ cores or heavy, you might look into NUMA tuning, but on a single-socket laptop, NUMA isn't applicable – all memory is uniform.
+In summary, a T480 can comfortably run a Windows VM. Using KVM with host-passthrough CPU, pinned vCPUs, hugepages, and virtio drivers will give performance close to running on bare metal, according to user benchmarks​
+leduccc.medium.com
+​
+docs.redhat.com
+. Monitor the VM’s CPU usage (via top or virsh domstats) to ensure the host isn’t overloaded, and adjust vCPU count accordingly (the i7-8650U is 4-core/8-thread, so giving the VM 4 vCPUs is reasonable, but leaving at least 1-2 threads for the host ensures Debian and background tasks remain smooth).
+Power Management and Thermal Optimization
+A minimal Debian/DWM setup can be fine-tuned for better battery life and cooler operation without sacrificing much performance. The ThinkPad T480 has two batteries (“Power Bridge” design), so efficient power management is key. We’ll leverage open-source tools like TLP, thermald, and others:
+TLP – Advanced Power Management: Install tlp and enable it (sudo systemctl enable --now tlp). TLP is a feature-rich tool that applies sane power-saving settings automatically​
+wiki.archlinux.org
+. It includes tweaks that replicate many of Powertop’s suggestions out-of-the-box​
+wiki.archlinux.org
+. With TLP, when you unplug AC power, it will automatically scale down power usage (e.g., dim screen, enable power-saver CPU governor, etc.), and on AC it allows higher performance. You can customize /etc/tlp.conf to fine-tune behavior:
+CPU energy policies: By default, TLP will allow turbo boost on AC and might disable turbo on battery to save energy. You can override CPU_BOOST_ON_BAT=1 if you want to allow Turbo Boost on battery for full performance (at the cost of battery life and heat). Similarly, check SCHED_POWERSAVE_ON_BAT and CPU_HWP_ON_BAT settings.
+PCI power management: TLP enables PCIe ASPM and autosuspend for devices on battery. This is usually beneficial. Make sure nothing critical is turned off – you can whitelist any USB device from autosuspend if it misbehaves.
+Disk settings: TLP may enable SATA link power management for your SSD on battery (like min_power setting). NVMe has its own power states (APST); TLP will typically leave NVMe at default settings, which are fine. (Samsung drives had issues with APST in the past, but on modern kernels it’s resolved. If you see NVMe errors in dmesg, you could disable APST via kernel param as a workaround.)
+Dual-battery handling: TLP (since v1.5+) supports ThinkPad battery thresholds and dual-battery management via ACPI. You can set charge thresholds to prolong battery lifespan – for example, start charging at 75% and stop at 85%. This is done by editing TLP_START_CHARGE_THRESH_BAT0/BAT1 and TLP_STOP_CHARGE_THRESH_BAT0/BAT1 in tlp.conf. On ThinkPads, TLP integrates with the firmware to enforce these limits​
+linrunner.de
+, which helps avoid constantly topping off the batteries (a known cause of wear). TLP’s defaults are optimized, but adjusting thresholds is a good idea if you often use AC power.
+Thermal Management (thermald & CPU Throttling): Intel’s thermald daemon helps keep the CPU cool by dynamically adjusting power and frequencies. It monitors the CPU/core temperatures and will engage various cooling techniques when thresholds are hit​
+wiki.debian.org
+​
+wiki.debian.org
+. For example, thermald can momentarily throttle CPU (via Intel P-state and Power Clamp) or engage passive cooling before fans ramp up​
+wiki.debian.org
+. On Debian 12, install thermald and start it (systemctl enable --now thermald). In its zero-configuration mode, thermald reads the CPU digital thermal sensor (DTS) and automatically tries to prevent critical temperatures​
+wiki.debian.org
+. This can prevent thermal throttling that the firmware might do abruptly, by smoothing it out in software. Essentially, thermald uses Intel’s power control features (like RAPL – Running Average Power Limit) to limit power just enough to avoid hitting the emergency thermal throttle point​
+wiki.debian.org
+. This means your CPU can often sustain higher frequencies for longer, without hitting the harsh firmware thermal cutoff. It works out-of-the-box on T480; for most, no custom config is needed. (You can create a custom /etc/thermald.xml if you want to tweak the trip points or cooling behavior, but it’s usually unnecessary.)
+“Throttled” Fix for ThinkPad T480: The T480 (and similar models like T480s, X1C6) had a known firmware issue that caused overly aggressive power throttling on Linux. Symptoms include the CPU power (PL1/PL2) getting capped very low (sometimes 7-10W) even when the system is cool, leading to slow performance​
+github.com
+​
+snapcraft.io
+. This was traced to a platform bug where the EC (embedded controller) or BIOS enforces a low power limit under certain conditions (possibly due to believing a non-Lenovo power adapter or battery is in use, or an ACPI table quirk). The community developed a tool called throttled to work around this. Throttled (also known as “Lenovo throttle fix”) adjusts MSR registers to remove artificial limits. Specifically, it can disable BDPROCHOT (BiDirectional PROCHOT) and raise the power limit to the CPU’s specs​
+wiki.archlinux.org
+​
+wiki.archlinux.org
+. On the T480, BDPROCHOT can be triggered by the system for reasons like “battery over current” or minor thermal events, forcing the CPU to 400 MHz​
+wiki.archlinux.org
+! Throttled ensures this signal is ignored unless truly necessary. It also sets consistent power limit values (PL1, PL2) that are higher than the faulty defaults. To use it, install the lenovo-throttling-fix (if available) or via pip/git. Enable its systemd service so it runs at boot. Important: Since this tool writes to CPU MSRs, if you have Secure Boot enabled, the kernel’s Lockdown mode might block it. You may need to disable Secure Boot or boot with a self-signed kernel to allow MSR access. Once running, throttled will log what changes it makes (you can run throttled --monitor to see real-time info). Users have reported dramatic improvements: the i7-8650U can maintain higher turbo frequencies without being inexplicably capped at low speeds​
+github.com
+. In addition, as an alternative or complement, you can manually disable BDPROCHOT using the msr-tools (wrmsr) approach​
+wiki.archlinux.org
+, but the throttled daemon automates it.
+Fan Control (ThinkFan): The T480’s fan is by default managed by firmware/EC via ACPI. If you find the fan is too loud or not aggressive enough, you can use ThinkFan to take manual control. ThinkFan is a lightweight fan control daemon for ThinkPads​
+wiki.gentoo.org
+. To enable it, first ensure the thinkpad_acpi kernel module is loaded with fan control allowed. Add options thinkpad_acpi fan_control=1 to /etc/modprobe.d/thinkpad.conf and reload the module (or reboot)​
+wiki.gentoo.org
+​
+wiki.gentoo.org
+. This lets software override fan speeds. Then install thinkfan and configure /etc/thinkfan.conf with temperature trip points and fan levels. A simple config can read CPU (and perhaps ACPI) temperatures and set fan level 0-7 accordingly. Be cautious: improper config could let the system overheat. Always monitor temps if using custom fan control. In many cases, you may not need ThinkFan – thermald and BIOS will ramp the fan when needed. But for those who want a quieter profile (at the risk of higher temps) or a cooler laptop (at the cost of noise), ThinkFan offers that flexibility. Remember to also allow thinkpad_acpi to expose the fan to user-space (the fan_control=1 we did, and ensure no conflict with thermald; you might disable thermald's passive tactics if you fully control fan). For most users, we recommend keeping the default fan control and using thermald; only advanced users should tinker with manual fan curves.
+Battery Management and Dual-Battery Tips: The T480’s dual-battery system consists of an internal battery (built-in) and a removable external battery. By hardware design, the system will switch between batteries seamlessly, but Lenovo’s firmware has its own logic for which battery drains first. On older models, the external battery was always drained first (so you could hot-swap it), then the internal. On the T480, however, the behavior can alternate to balance wear. The embedded controller may choose to use the battery with fewer charge cycles first, to even out the aging of the two batteries​
+bbs.archlinux.org
+. This means sometimes your internal battery might drain before the external, which can be puzzling. This is normal and not configurable from the OS side​
+bbs.archlinux.org
+. If you prefer to always use the external first (for instance, to preserve your internal battery’s life), unfortunately there is no official setting. Some users attempt ACPI calls to force battery use, but results vary. Instead, rely on TLP’s charge thresholds to manage long-term wear. For example, if you mostly use AC, you might set the internal battery to charge only up to 80%. That way, the external (maybe a larger 72Wh pack) will handle more of the usage. TLP’s tlp-stat -b can show detailed info on both batteries, including cycle count and current charge. Also, note a quirk: when one battery is discharging (in use), the other battery will not discharge or charge simultaneously – the power controller toggles between them​
+linrunner.de
+​
+linrunner.de
+. This means you won’t see both batteries drop in % at the same time; it’s one then the other. When charging, typically both will charge (often the internal first to 80% then external, depending on firmware logic). For calibrating battery gauges, you can use tlp recalibrate BAT0/BAT1 which will force a full discharge and charge cycle​
+linrunner.de
+​
+linrunner.de
+. Overall, keep an eye on battery health via tlp-stat and consider setting thresholds to prolong their lifespan – ThinkPads are known for allowing this control.
+ACPI Kernel Modules and Miscellaneous Tweaks: The thinkpad_acpi module handles many laptop-specific features: hotkeys (volume, brightness, Fn keys), radio toggles, LED control, and exposing battery info. It loads automatically on Debian. You can customize some parameters: for instance, to get trackpoint scrolling via middle button, create an /etc/X11/xorg.conf.d snippet for libinput (this is more usability than performance). For ACPI events (like lid close, or plugging AC), you might use acpid with custom scripts if needed, but TLP already covers many power events. Check that deep sleep (suspend to RAM) is enabled: on some newer ThinkPads, Lenovo defaulted to “Windows 10” mode which might use a modern standby (s0ix) – but on T480, S3 sleep should work. If cat /sys/power/mem_sleep shows s2idle [deep], then deep S3 sleep is available and will be used for suspend, which is good for low power standby. If it only shows s2idle, you might need a BIOS setting tweak (in newer models, toggling "Sleep State" to Linux). T480 likely has S3 by default. Additionally, if you want to reduce peripheral power draw: disable Bluetooth when not in use (rfkill or let TLP do it on battery), and disconnect any USB device that isn’t needed (or use UPower settings to autosuspend them). Every little bit helps on a laptop without a massive battery. Finally, consider kernel parameter pcie_aspm=force if you want to ensure PCIe Active-State Power Management is on (if not already). But this can sometimes cause issues, and TLP usually handles enabling ASPM on Intel systems.
+In short, Debian 12 plus tools like TLP and thermald will give you an efficient, cool-running T480. TLP’s default profile is quite good, implementing many recommended power tweaks automatically​
+wiki.archlinux.org
+. By addressing the T480’s specific quirks (like the throttling fix and dual-battery thresholds), you can achieve both strong performance when needed and long battery life on the go.
+ThinkPad-Specific Enhancements and BIOS Considerations
+This section covers a few remaining ThinkPad T480 quirks and settings that don’t fall under general categories, ensuring you get the most out of the hardware:
+BIOS/UEFI Settings: Double-check your BIOS settings for anything that can affect performance:
+CPU Settings: Ensure Intel SpeedStep and Speed Shift are enabled (they usually are by default, to allow OS frequency scaling). Speed Shift (HWP) allows finer-grained control and faster frequency transitions by the CPU itself, which the intel_pstate driver utilizes.
+Memory: The T480 likely has no BIOS option for memory tuning (other than XMP maybe if supported); 16GB is plenty for virtualization tasks but if upgradable, consider dual-channel (two DIMMs) for better memory bandwidth.
+VT-x and VT-d: These should be Enabled since you plan on KVM (you already did this, but for completeness: VT-x might be under “Security > Virtualization” and VT-d under “Config > Thunderbolt/IO”). Also enable “Trusted Execution” or similar if you need virtual TPM, but not necessary.
+Thunderbolt: If your model has Thunderbolt 3, consider setting the security to “user authorization” or “disabled” if not in use, to slightly reduce power drain. If you use a TB3 dock or eGPU (though eGPU not likely with no dGPU), you'll want it enabled. Some T480 BIOS versions had Thunderbolt firmware updates delivered via LVFS – run fwupdmgr get-updates to see if any are pending.
+Boot mode: Use UEFI with TPM/PTT on if you intend to use features like secure boot or BitLocker in a Windows VM via passthrough (you can pass through a vTPM in libvirt).
+Secure Boot: As mentioned, you may want this Disabled during Linux use, because it can prevent low-level tweaks (MSR writes via throttled, custom kernel modules, etc.) due to the Lockdown security feature. If you prefer to keep Secure Boot on, you can sign the kernel or disable Lockdown in runtime, but it’s advanced. For simplicity, many Linux users just disable Secure Boot to avoid these hurdles.
+ThinkPad ACPI Extras: The thinkpad_acpi driver provides some sysfs knobs for the T480. For example, you can find entries under /proc/acpi/ibm/ (or /sys/devices/platform/thinkpad_acpi/) for things like brightness, LEDs, and fan. While most of these are handled by higher-level tools now, it’s good to know. Some popular tweaks:
+Hibernate vs Sleep: If you use hibernation, test it on T480 – it should work (ensure a swap file >= RAM size). Modern standby isn’t a concern on this model, so S3 sleep is reliable.
+LCD Power Saving: You can enable Panel Self-Refresh and other iGPU powersaving features via kernel parameters or tool like intel_gpu_tools, but these are minor. Alternatively, you can use GNOME’s power panel or command-line to turn off the display when idle which TLP can also assist with.
+Full Disk Encryption Tip: If you use LUKS, enabling AES-NI (should be automatic if CPU supports it, which i7-8650U does) ensures encryption/decryption is hardware-accelerated, minimizing performance impact.
+fwupd for firmware: We mentioned BIOS and TB3 updates; also use it to update the USB hub firmware or fingerprint reader if available (LVFS occasionally has updates for those components, improving stability or power).
+Docking and External Monitors: The T480 often is used with docking solutions (e.g., Lenovo Ultra Dock via the side connector or Thunderbolt dock). On Debian, using a dock just works, but if you encounter issues like external monitors not being detected via Thunderbolt, make sure the bolt daemon is installed to manage Thunderbolt device authorization. No performance tweaks needed beyond having the latest firmware for the dock (which fwupd can handle if supported). Driving multiple external monitors on the iGPU might stress it a bit – just something to be aware of, but with DWM (lightweight WM) it should be fine. You might see increased power usage when handling two 1080p monitors, etc.
+Undervolting (if desired): On some ThinkPads, users undervolt the CPU to reduce heat and increase sustained performance. However, due to the Plundervolt vulnerability, CPUs after 2019 BIOS updates often lock undervolting. If your BIOS is pre-patched or has an option to allow undervolting (XTU interface), you could use intel-undervolt or wrmsr to set voltage offsets. This is not officially supported and can cause instability if done improperly. Given that throttled already addresses power limits, we advise caution with undervolting. If you do attempt it, monitor for any crashes. A moderate undervolt (e.g., -80 mV core/cache) can drop temps a few degrees. But again, many newer BIOS outright ignore any undervolt requests unless you disable certain security features.
+All these ThinkPad-specific considerations ensure you’re not leaving performance on the table. The key ones are the throttle fix and battery management – the rest are “nice to have” tweaks that refine the experience on your T480.
+Monitoring and Performance Tracking Tools
+To keep an eye on system performance, thermals, and virtualization overhead, consider installing some monitoring tools:
+General System Monitors:
+htop – an improved top, to view real-time CPU usage per thread (you can see all 8 threads of your i7 and whether the VM is monopolizing some). It also shows memory usage, processes, etc.
+glances or btop – alternative terminal monitoring with more eye candy, combining CPU, disk, network in one view.
+dstat or atop – for logging resource usage over time (helpful to see if CPU was throttling or if I/O is saturated during VM operations).
+CPU-Specific Tools:
+lscpu – to list CPU features and confirm virtualization extensions and frequency info.
+turbostat – part of linux-cpupower or kernel-tools on Debian. It reports detailed CPU frequency, C-state residency, and power usage. You can run sudo turbostat --interval 5 to see how your CPU turbo boosts under load and if it hits power or thermal limits (look at “PkgWatt”, “CorWatt” for power, and “Tmp” for temp per package). This is great for validating that thermald and throttled are doing their job (you should see the package power PL1 near 15W sustained on battery or higher on AC for the 8650U, rather than stuck at 7W, for example).
+powertop – a tool to monitor power usage of each device and process. It can estimate battery discharge rate in watts. You can use powertop --auto-tune to apply some power-saving tweaks at runtime (many overlap with TLP). Since you use TLP, you wouldn’t normally run powertop’s auto-tune concurrently, but powertop is still useful to identify what’s using power. For instance, it might show if your NVMe is in a low-power state, or if a USB device is preventing deeper CPU C-states.
+sensors – from lm-sensors, to monitor temperatures (CPU core temps, thinkpad ACPI temp, etc.) and fan speed. Run sensors after sensors-detect to check that. The thinkpad_acpi module exposes the fan speed and possibly battery temps under sensors.
+Battery and Power Tools:
+tlp-stat – comes with TLP, run sudo tlp-stat -s -t -b to get a comprehensive report of power settings, temperature, and battery info. It shows current power draw, CPU speed, device power states, as well as battery wear level, designed capacity vs current, etc.
+upower – a simpler way to get battery status, e.g., upower -i /org/freedesktop/UPower/devices/battery_BAT0 for each battery. This can script retrieval of battery percentage and remaining time.
+acpi – a command-line that shows battery status and thermal zone info (if you prefer that over upower).
+Virtualization Monitoring:
+virt-manager – even if you primarily use the VM via DWM or CLI, virt-manager provides a GUI that shows the VM’s virtual CPU, network, and disk usage graphs in real-time. It's handy to visualize VM load.
+virsh domstats <vmname> – gives you stats on vCPU time, memory, etc., in a scriptable way.
+virt-top – similar to htop but for virtual machines. It lists VMs and their resource usage (needs installation).
+Inside the Windows guest, use Task Manager or Resource Monitor to see if the virtio drivers are working well (no high CPU usage for interrupts, etc.). Also, if doing disk benchmarking, compare results with what the host can do to gauge virtualization overhead.
+Low-level Diagnostics:
+If you suspect any ACPI issues, check dmesg for ACPI warnings. The thinkpad_acpi driver might log messages about unsupported features or failures (rare on T480).
+Use journalctl -u thermald -f to follow thermald’s actions (it will log when it’s limiting power or cooling).
+Use journalctl -u throttled -f (or whichever method you used) to see logs from the throttling fix.
+The perf tool (linux perf) can be used to profile performance if you have a specific bottleneck, but that’s more advanced.
+Finally, remember that Debian 12 is a stable (and slightly conservative) distro, so all the tools we discussed (TLP, thermald, etc.) are well-tested with it. By applying the optimizations above, you leverage open-source, upstream-supported solutions to get the best performance out of your ThinkPad T480 while maintaining efficiency. The combination of proper drivers, KVM tuning, and power management should let you seamlessly run a Windows VM for productivity (or even light gaming) and switch back to a long-lasting Linux environment on battery. Enjoy your optimized system! Sources:
+ArchWiki: Lenovo ThinkPad T480 – Linux compatibility and hardware specifics​
+wiki.archlinux.org
+​
+wiki.archlinux.org
+​
+wiki.archlinux.org
+ArchWiki: ThinkPad T480 Tweaks – Touchpad intertouch and BD PROCHOT throttle fix​
+wiki.archlinux.org
+​
+wiki.archlinux.org
+Proxmox Wiki: Windows VirtIO Drivers – VirtIO paravirtualized drivers maximize guest I/O performance​
+pve.proxmox.com
+Red Hat Docs: Virtualization Tuning – CPU pinning and hugepages improve cache utilization and memory throughput​
+docs.redhat.com
+​
+docs.redhat.com
+ADMIN Magazine: VNC and Spice – Spice protocol offers superior speed and features over VNC for VM display​
+admin-magazine.com
+Debian Wiki: Thermald – Linux thermal daemon uses P-state and RAPL to prevent overheating on Intel platforms​
+wiki.debian.org
+​
+wiki.debian.org
+Gentoo Wiki: ThinkFan – Enabling manual fan control via thinkpad_acpi module on ThinkPads​
+wiki.gentoo.org
+​
+wiki.gentoo.org
+ArchWiki: TLP – TLP’s default settings are optimized for battery life, integrating powertop recommendations​
+wiki.archlinux.org
+Arch Forum: T480 dual battery behavior – T480 alternates between internal/external battery to balance wear (firmware controlled)​
+bbs.archlinux.org
+Leduccc (Medium): Optimizing Windows VM on KVM – Using host-passthrough CPU for near bare-metal performance​
+leduccc.medium.com
+ and enabling Hyper-V enlightenments to improve Windows guest responsivenes
